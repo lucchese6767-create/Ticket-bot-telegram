@@ -1145,4 +1145,964 @@ def priority_panel(
             )
         ],
         [
-            InlineKeyboard
+            InlineKeyboardButton(
+                "🟡 Normal",
+                callback_data=f"setprio_{ticket_id}_normal"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🟠 Alta",
+                callback_data=f"setprio_{ticket_id}_alta"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔴 Urgente",
+                callback_data=f"setprio_{ticket_id}_urgente"
+            )
+        ]
+    ])
+
+
+# ============================================================
+# TEXTO DO TICKET
+# ============================================================
+
+def ticket_text(ticket):
+
+    assigned = (
+        f"<code>{ticket['assigned_to']}</code>"
+        if ticket["assigned_to"]
+        else "Ninguém"
+    )
+
+    priority = PRIORITIES.get(
+        ticket["priority"],
+        ticket["priority"]
+    )
+
+    return (
+        f"🎫 <b>TICKET #{ticket['id']:04d}</b>\n\n"
+        f"👤 Usuário: "
+        f"{esc(ticket['username'] or ticket['full_name'])}\n"
+        f"🆔 ID: "
+        f"<code>{ticket['user_id']}</code>\n"
+        f"📂 Categoria: "
+        f"{esc(ticket['category'])}\n"
+        f"🚨 Prioridade: "
+        f"{esc(priority)}\n"
+        f"🎯 Responsável: "
+        f"{assigned}\n"
+        f"📅 Criado: "
+        f"{esc(ticket['created_at'])}\n\n"
+        f"🟢 Status: "
+        f"<b>{esc(ticket['status'])}</b>"
+    )
+
+
+# ============================================================
+# /START
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if not update.effective_chat:
+        return
+
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    user = update.effective_user
+
+    await update.message.reply_text(
+        f"👋 Olá, <b>{esc(user.first_name)}</b>!\n\n"
+        "🎫 <b>CENTRAL DE ATENDIMENTO</b>\n\n"
+        "Abra um ticket para falar com nossa equipe.",
+        parse_mode="HTML",
+        reply_markup=main_panel()
+    )
+
+
+# ============================================================
+# /TICKET
+# ============================================================
+
+async def ticket_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    if update.effective_chat.type != ChatType.PRIVATE:
+        return
+
+    await update.message.reply_text(
+        "🎫 <b>CENTRAL DE TICKETS</b>\n\n"
+        "Escolha a categoria:",
+        parse_mode="HTML",
+        reply_markup=category_panel()
+    )
+
+
+# ============================================================
+# /PAINEL
+# ============================================================
+
+async def painel_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if not has_permission(
+        user.id,
+        "support"
+    ):
+
+        await update.message.reply_text(
+            "❌ Você não possui permissão."
+        )
+
+        return
+
+    if update.effective_chat.id != SUPPORT_CHAT_ID:
+
+        await update.message.reply_text(
+            "❌ Use este comando no grupo de suporte."
+        )
+
+        return
+
+    tickets = get_all_open_tickets()
+
+    if not tickets:
+
+        await update.message.reply_text(
+            "📭 <b>Nenhum ticket aberto.</b>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    text = (
+        "🎫 <b>PAINEL DE TICKETS</b>\n\n"
+    )
+
+    for ticket in tickets[:30]:
+
+        priority = PRIORITIES.get(
+            ticket["priority"],
+            ticket["priority"]
+        )
+
+        text += (
+            f"🎫 <b>#{ticket['id']:04d}</b>\n"
+            f"👤 {esc(ticket['username'] or ticket['full_name'])}\n"
+            f"📂 {esc(ticket['category'])}\n"
+            f"🚨 {esc(priority)}\n"
+            f"🎯 {ticket['assigned_to'] or 'Ninguém'}\n\n"
+        )
+
+    await update.message.reply_text(
+        text,
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# ABRIR TICKET
+# ============================================================
+
+async def open_ticket_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    await query.edit_message_text(
+        "🎫 <b>CENTRAL DE TICKETS</b>\n\n"
+        "Escolha a categoria:",
+        parse_mode="HTML",
+        reply_markup=category_panel()
+    )
+
+
+# ============================================================
+# CRIAR TICKET
+# ============================================================
+
+async def category_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user = query.from_user
+
+    existing = get_open_ticket(
+        user.id
+    )
+
+    if existing:
+
+        await query.edit_message_text(
+            f"⚠️ Você já possui um ticket aberto.\n\n"
+            f"🎫 <b>#{existing['id']:04d}</b>",
+            parse_mode="HTML",
+            reply_markup=ticket_user_panel(
+                existing["id"]
+            )
+        )
+
+        return
+
+    category_map = {
+        "cat_compras": "compras",
+        "cat_suporte": "suporte",
+        "cat_financeiro": "financeiro",
+        "cat_outros": "outros",
+    }
+
+    category_key = category_map.get(
+        query.data
+    )
+
+    if not category_key:
+        return
+
+    category = CATEGORIES[
+        category_key
+    ]
+
+    if SUPPORT_CHAT_ID == 0:
+
+        await query.edit_message_text(
+            "❌ <b>SUPPORT_CHAT_ID não configurado.</b>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # CRIA NO BANCO
+    # --------------------------------------------------------
+
+    ticket_id = create_ticket(
+        user.id,
+        user.username,
+        user.full_name,
+        category
+    )
+
+    ticket = get_ticket(ticket_id)
+
+    # --------------------------------------------------------
+    # CRIA TÓPICO
+    # --------------------------------------------------------
+
+    try:
+
+        topic = await context.bot.create_forum_topic(
+            chat_id=SUPPORT_CHAT_ID,
+            name=(
+                f"🎫 #{ticket_id:04d} - "
+                f"{user_label(user)[:50]}"
+            )
+        )
+
+        topic_id = topic.message_thread_id
+
+        set_topic(
+            ticket_id,
+            topic_id
+        )
+
+    except Exception as e:
+
+        logger.exception(
+            "Erro criando tópico."
+        )
+
+        close_ticket(
+            ticket_id,
+            user.id
+        )
+
+        await query.edit_message_text(
+            "❌ Não consegui criar o ticket.\n\n"
+            "Verifique se o bot é administrador do "
+            "grupo e possui permissão para gerenciar tópicos."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # REGISTRA LOG
+    # --------------------------------------------------------
+
+    save_log(
+        ticket_id,
+        user.id,
+        "ticket_created",
+        category
+    )
+
+    # --------------------------------------------------------
+    # ENVIA PARA EQUIPE
+    # --------------------------------------------------------
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=SUPPORT_CHAT_ID,
+            message_thread_id=topic_id,
+            text=(
+                "🎫 <b>NOVO TICKET</b>\n\n"
+                f"{ticket_text(ticket)}\n\n"
+                "👨‍💻 Um membro da equipe pode assumir "
+                "este atendimento.\n\n"
+                "Comandos disponíveis:\n"
+                "<code>/assumir</code>\n"
+                "<code>/adicionar ID</code>\n"
+                "<code>/remover ID</code>\n"
+                "<code>/fechar</code>\n"
+                "<code>/prioridade</code>"
+            ),
+            parse_mode="HTML",
+            reply_markup=staff_ticket_panel(
+                ticket_id
+            )
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Erro enviando mensagem para suporte."
+        )
+
+    # --------------------------------------------------------
+    # AVISA USUÁRIO
+    # --------------------------------------------------------
+
+    await query.edit_message_text(
+        "✅ <b>Ticket criado!</b>\n\n"
+        f"🎫 Número: <b>#{ticket_id:04d}</b>\n"
+        f"📂 Categoria: {esc(category)}\n"
+        "🟢 Status: Aberto\n\n"
+        "Envie sua mensagem aqui. "
+        "Nossa equipe receberá automaticamente.",
+        parse_mode="HTML",
+        reply_markup=ticket_user_panel(
+            ticket_id
+        )
+    )
+
+    await send_log(
+        context,
+        (
+            "🎫 <b>NOVO TICKET</b>\n\n"
+            f"Ticket: <code>#{ticket_id:04d}</code>\n"
+            f"Usuário: <code>{user.id}</code>\n"
+            f"Categoria: {esc(category)}"
+        )
+    )
+
+
+# ============================================================
+# MEU TICKET
+# ============================================================
+
+async def my_ticket_button(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user = query.from_user
+
+    ticket = get_open_ticket(
+        user.id
+    )
+
+    if not ticket:
+
+        await query.edit_message_text(
+            "📭 Você não possui nenhum ticket aberto.",
+            reply_markup=main_panel()
+        )
+
+        return
+
+    await query.edit_message_text(
+        ticket_text(ticket),
+        parse_mode="HTML",
+        reply_markup=ticket_user_panel(
+            ticket["id"]
+        )
+    )
+
+
+# ============================================================
+# FECHAR PELO USUÁRIO
+# ============================================================
+
+async def user_close_ticket(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    user = query.from_user
+
+    try:
+
+        ticket_id = int(
+            query.data.split("_")[-1]
+        )
+
+    except (ValueError, IndexError):
+
+        return
+
+    ticket = get_ticket(
+        ticket_id
+    )
+
+    if not ticket:
+
+        await query.edit_message_text(
+            "❌ Ticket não encontrado."
+        )
+
+        return
+
+    if ticket["user_id"] != user.id:
+
+        await query.answer(
+            "❌ Este ticket não pertence a você.",
+            show_alert=True
+        )
+
+        return
+
+    if ticket["status"] != "open":
+
+        await query.edit_message_text(
+            "ℹ️ Este ticket já está fechado."
+        )
+
+        return
+
+    close_ticket(
+        ticket_id,
+        user.id
+    )
+
+    save_log(
+        ticket_id,
+        user.id,
+        "ticket_closed",
+        "Fechado pelo usuário"
+    )
+
+    ticket = get_ticket(
+        ticket_id
+    )
+
+    # --------------------------------------------------------
+    # AVISA EQUIPE
+    # --------------------------------------------------------
+
+    if ticket["topic_id"]:
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=SUPPORT_CHAT_ID,
+                message_thread_id=ticket["topic_id"],
+                text=(
+                    "🔒 <b>TICKET FECHADO</b>\n\n"
+                    f"O usuário fechou o ticket "
+                    f"<b>#{ticket_id:04d}</b>."
+                ),
+                parse_mode="HTML"
+            )
+
+        except Exception:
+
+            logger.exception(
+                "Erro avisando fechamento."
+            )
+
+    await send_transcript(
+        context,
+        ticket
+    )
+
+    await send_log(
+        context,
+        (
+            "🔒 <b>TICKET FECHADO</b>\n\n"
+            f"Ticket: <code>#{ticket_id:04d}</code>\n"
+            f"Fechado por: <code>{user.id}</code>"
+        )
+    )
+
+    await query.edit_message_text(
+        f"🔒 <b>Ticket #{ticket_id:04d} fechado.</b>\n\n"
+        "Obrigado pelo contato.",
+        parse_mode="HTML",
+        reply_markup=main_panel()
+    )
+
+
+# ============================================================
+# /ASSUMIR
+# ============================================================
+
+async def assumir_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if update.effective_chat.id != SUPPORT_CHAT_ID:
+        return
+
+    if not has_permission(
+        user.id,
+        "support"
+    ):
+
+        await update.message.reply_text(
+            "❌ Você não faz parte da equipe."
+        )
+
+        return
+
+    topic_id = update.effective_message.message_thread_id
+
+    if not topic_id:
+
+        await update.message.reply_text(
+            "❌ Este comando precisa ser usado dentro de um ticket."
+        )
+
+        return
+
+    ticket = get_ticket_by_topic(
+        topic_id
+    )
+
+    if not ticket:
+
+        await update.message.reply_text(
+            "❌ Este tópico não está vinculado a um ticket."
+        )
+
+        return
+
+    assign_ticket(
+        ticket["id"],
+        user.id
+    )
+
+    add_ticket_staff(
+        ticket["id"],
+        user.id
+    )
+
+    save_log(
+        ticket["id"],
+        user.id,
+        "ticket_claimed",
+        f"Assumido por {user.id}"
+    )
+
+    await update.message.reply_text(
+        f"🎯 <b>Ticket assumido!</b>\n\n"
+        f"👨‍💻 Responsável: "
+        f"<code>{user.id}</code>",
+        parse_mode="HTML"
+    )
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=ticket["user_id"],
+            text=(
+                "🎯 <b>Seu ticket foi assumido!</b>\n\n"
+                f"Um atendente da equipe está "
+                f"atendendo você agora.\n\n"
+                f"🎫 Ticket: "
+                f"<code>#{ticket['id']:04d}</code>"
+            ),
+            parse_mode="HTML"
+        )
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# /ADICIONAR
+# ============================================================
+
+async def adicionar_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if update.effective_chat.id != SUPPORT_CHAT_ID:
+        return
+
+    if not has_permission(
+        user.id,
+        "supervisor"
+    ):
+
+        await update.message.reply_text(
+            "❌ Apenas supervisores ou administradores podem adicionar agentes."
+        )
+
+        return
+
+    topic_id = update.effective_message.message_thread_id
+
+    ticket = get_ticket_by_topic(
+        topic_id
+    )
+
+    if not ticket:
+
+        await update.message.reply_text(
+            "❌ Use este comando dentro de um ticket."
+        )
+
+        return
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "❌ Uso:\n"
+            "<code>/adicionar 123456789</code>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    try:
+
+        target_id = int(
+            context.args[0]
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ ID inválido."
+        )
+
+        return
+
+    add_ticket_staff(
+        ticket["id"],
+        target_id
+    )
+
+    save_log(
+        ticket["id"],
+        user.id,
+        "agent_added",
+        f"Agente {target_id}"
+    )
+
+    await update.message.reply_text(
+        f"➕ Agente <code>{target_id}</code> "
+        "adicionado ao ticket.",
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# /REMOVER
+# ============================================================
+
+async def remover_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if update.effective_chat.id != SUPPORT_CHAT_ID:
+        return
+
+    if not has_permission(
+        user.id,
+        "supervisor"
+    ):
+
+        await update.message.reply_text(
+            "❌ Apenas supervisores ou administradores podem remover agentes."
+        )
+
+        return
+
+    topic_id = update.effective_message.message_thread_id
+
+    ticket = get_ticket_by_topic(
+        topic_id
+    )
+
+    if not ticket:
+
+        await update.message.reply_text(
+            "❌ Use este comando dentro de um ticket."
+        )
+
+        return
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "❌ Uso:\n"
+            "<code>/remover 123456789</code>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    try:
+
+        target_id = int(
+            context.args[0]
+        )
+
+    except ValueError:
+
+        await update.message.reply_text(
+            "❌ ID inválido."
+        )
+
+        return
+
+    removed = remove_ticket_staff(
+        ticket["id"],
+        target_id
+    )
+
+    if not removed:
+
+        await update.message.reply_text(
+            "⚠️ Esse agente não está atribuído ao ticket."
+        )
+
+        return
+
+    save_log(
+        ticket["id"],
+        user.id,
+        "agent_removed",
+        f"Agente {target_id}"
+    )
+
+    await update.message.reply_text(
+        f"➖ Agente <code>{target_id}</code> "
+        "removido do ticket.",
+        parse_mode="HTML"
+    )
+
+
+# ============================================================
+# /PRIORIDADE
+# ============================================================
+
+async def prioridade_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if update.effective_chat.id != SUPPORT_CHAT_ID:
+        return
+
+    if not has_permission(
+        user.id,
+        "support"
+    ):
+
+        return
+
+    topic_id = update.effective_message.message_thread_id
+
+    ticket = get_ticket_by_topic(
+        topic_id
+    )
+
+    if not ticket:
+
+        return
+
+    if not context.args:
+
+        await update.message.reply_text(
+            "🚨 <b>Prioridades:</b>\n\n"
+            "<code>/prioridade baixa</code>\n"
+            "<code>/prioridade normal</code>\n"
+            "<code>/prioridade alta</code>\n"
+            "<code>/prioridade urgente</code>",
+            parse_mode="HTML"
+        )
+
+        return
+
+    priority = context.args[0].lower()
+
+    if priority not in PRIORITIES:
+
+        await update.message.reply_text(
+            "❌ Prioridade inválida."
+        )
+
+        return
+
+    set_priority(
+        ticket["id"],
+        priority
+    )
+
+    save_log(
+        ticket["id"],
+        user.id,
+        "priority_changed",
+        priority
+    )
+
+    await update.message.reply_text(
+        f"🚨 Prioridade alterada para "
+        f"<b>{esc(PRIORITIES[priority])}</b>.",
+        parse_mode="HTML"
+    )
+
+    try:
+
+        await context.bot.send_message(
+            chat_id=ticket["user_id"],
+            text=(
+                f"🚨 A prioridade do seu ticket "
+                f"<b>#{ticket['id']:04d}</b> foi atualizada."
+            ),
+            parse_mode="HTML"
+        )
+
+    except Exception:
+        pass
+
+
+)
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            staff_callback,
+            pattern=r"^(claim|close|priority)_\d+$"
+        )
+    )
+
+    application.add_handler(
+        CallbackQueryHandler(
+            staff_callback,
+            pattern=r"^setprio_\d+_(baixa|normal|alta|urgente)$"
+        )
+    )
+
+    # --------------------------------------------------------
+    # MENSAGENS
+    # --------------------------------------------------------
+
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE
+            & ~filters.COMMAND,
+            private_message_handler
+        )
+    )
+
+    application.add_handler(
+        MessageHandler(
+            filters.Chat(
+                SUPPORT_CHAT_ID
+            )
+            & ~filters.COMMAND,
+            support_message_handler
+        )
+    )
+
+    # --------------------------------------------------------
+    # ERROS
+    # --------------------------------------------------------
+
+    application.add_error_handler(
+        error_handler
+    )
+
+    logger.info(
+        "======================================"
+    )
+
+    logger.info(
+        "TICKET BOT INICIADO"
+    )
+
+    logger.info(
+        "SUPPORT_CHAT_ID: %s",
+        SUPPORT_CHAT_ID
+    )
+
+    logger.info(
+        "LOG_CHAT_ID: %s",
+        LOG_CHAT_ID
+    )
+
+    logger.info(
+        "OWNERS: %s",
+        OWNER_IDS
+    )
+
+    logger.info(
+        "======================================"
+    )
+
+    application.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=True
+    )
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+
+if __name__ == "__main__":
+    main()

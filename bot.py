@@ -1,29 +1,26 @@
 # ============================================================
-# TICKET BOT — TELEGRAM
-# Versão avançada estilo Ticket King
+# TICKET BOT TELEGRAM
+# Estilo Ticket King
 #
-# Recursos:
-# 🎫 Tickets privados
-# 🛒 Categorias
-# 🔢 Numeração automática
-# 👨‍💻 Equipe de suporte
-# 👑 Sistema de cargos
-# 🎯 Assumir ticket
-# ➕ Adicionar agente
-# ➖ Remover agente
-# 🚨 Prioridades
-# 📊 Painel
-# 📈 Estatísticas
-# 📝 Logs
-# 📜 Transcrição automática
-# 💾 SQLite
+# Python 3.10+
+# python-telegram-bot >= 22.0
 #
-# Requer:
-# python-telegram-bot >= 22
+# Variáveis de ambiente:
+#
+# BOT_TOKEN=TOKEN_DO_BOT
+# SUPPORT_CHAT_ID=-1001234567890
+# LOG_CHAT_ID=-1001234567890
+# OWNER_IDS=123456789,987654321
+#
+# O SUPPORT_CHAT_ID precisa ser um SUPERGRUPO com:
+# - Tópicos/Fórum ativados
+# - O bot como administrador
+# - Permissão para gerenciar tópicos
 # ============================================================
 
 import os
 import io
+import html
 import sqlite3
 import logging
 from datetime import datetime
@@ -48,33 +45,26 @@ from telegram.ext import (
 # CONFIGURAÇÃO
 # ============================================================
 
-BOT_TOKEN = os.getenv(
-    "BOT_TOKEN",
-    "COLOQUE_SEU_TOKEN_AQUI"
-)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Grupo privado da equipe.
-# Deve ser um SUPERGRUPO com TÓPICOS/FÓRUM ativados.
 SUPPORT_CHAT_ID = int(
     os.getenv("SUPPORT_CHAT_ID", "0")
 )
 
-# Grupo/canal onde serão enviados os logs.
 LOG_CHAT_ID = int(
     os.getenv("LOG_CHAT_ID", "0")
 )
 
-# IDs dos administradores principais.
-#
-# Exemplo:
-# OWNER_IDS=123456789,987654321
 OWNER_IDS = {
     int(x.strip())
     for x in os.getenv("OWNER_IDS", "").split(",")
     if x.strip().isdigit()
 }
 
-DATABASE = "tickets.db"
+DATABASE = os.getenv(
+    "DATABASE",
+    "tickets.db"
+)
 
 
 # ============================================================
@@ -95,14 +85,67 @@ logger = logging.getLogger("ticket_bot")
 
 
 # ============================================================
+# CATEGORIAS
+# ============================================================
+
+CATEGORIES = {
+    "compras": "🛒 Compras",
+    "suporte": "🛠️ Suporte",
+    "financeiro": "💰 Financeiro",
+    "outros": "📦 Outros",
+}
+
+
+# ============================================================
+# PRIORIDADES
+# ============================================================
+
+PRIORITIES = {
+    "baixa": "🟢 Baixa",
+    "normal": "🟡 Normal",
+    "alta": "🟠 Alta",
+    "urgente": "🔴 Urgente",
+}
+
+
+# ============================================================
+# CARGOS
+# ============================================================
+
+ROLES = {
+    "trainee": {
+        "name": "🎓 Treinando",
+        "level": 1,
+    },
+    "support": {
+        "name": "👨‍💻 Suporte",
+        "level": 2,
+    },
+    "supervisor": {
+        "name": "🛡️ Supervisor",
+        "level": 3,
+    },
+    "admin": {
+        "name": "👑 Administrador",
+        "level": 4,
+    },
+}
+
+
+# ============================================================
 # BANCO
 # ============================================================
 
 def get_db():
-    return sqlite3.connect(
+    conn = sqlite3.connect(
         DATABASE,
+        timeout=30,
         check_same_thread=False
     )
+
+    conn.row_factory = sqlite3.Row
+
+    return conn
 
 
 def init_db():
@@ -110,25 +153,21 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
-    # --------------------------------------------------------
-    # TICKETS
-    # --------------------------------------------------------
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS tickets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
             user_id INTEGER NOT NULL,
-
             username TEXT,
-
             full_name TEXT,
 
             category TEXT NOT NULL,
 
-            status TEXT NOT NULL DEFAULT 'open',
+            status TEXT NOT NULL
+                DEFAULT 'open',
 
-            priority TEXT NOT NULL DEFAULT 'normal',
+            priority TEXT NOT NULL
+                DEFAULT 'normal',
 
             topic_id INTEGER,
 
@@ -142,27 +181,19 @@ def init_db():
         )
     """)
 
-    # --------------------------------------------------------
-    # EQUIPE
-    # --------------------------------------------------------
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS staff (
             user_id INTEGER PRIMARY KEY,
 
             username TEXT,
-
             full_name TEXT,
 
-            role TEXT NOT NULL DEFAULT 'support',
+            role TEXT NOT NULL
+                DEFAULT 'support',
 
             added_at TEXT NOT NULL
         )
     """)
-
-    # --------------------------------------------------------
-    # AGENTES POR TICKET
-    # --------------------------------------------------------
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS ticket_staff (
@@ -175,10 +206,6 @@ def init_db():
             PRIMARY KEY(ticket_id, user_id)
         )
     """)
-
-    # --------------------------------------------------------
-    # MENSAGENS
-    # --------------------------------------------------------
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS messages (
@@ -198,14 +225,25 @@ def init_db():
         )
     """)
 
-    # --------------------------------------------------------
-    # CONFIGURAÇÕES
-    # --------------------------------------------------------
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            ticket_id INTEGER,
+
+            actor_id INTEGER,
+
+            action TEXT NOT NULL,
+
+            details TEXT,
+
+            created_at TEXT NOT NULL
+        )
+    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
-
             value TEXT
         )
     """)
@@ -224,7 +262,14 @@ def now():
     )
 
 
-def safe_username(user):
+def esc(value):
+    if value is None:
+        return ""
+
+    return html.escape(str(value))
+
+
+def user_label(user):
 
     if user.username:
         return f"@{user.username}"
@@ -232,35 +277,21 @@ def safe_username(user):
     return user.full_name or str(user.id)
 
 
+def row_to_tuple(row):
+
+    if row is None:
+        return None
+
+    return tuple(row)
+
+
+# ============================================================
+# PERMISSÕES
+# ============================================================
+
 def is_owner(user_id):
+
     return user_id in OWNER_IDS
-
-
-# ============================================================
-# EQUIPE / CARGOS
-# ============================================================
-
-ROLES = {
-    "admin": {
-        "name": "👑 Administrador",
-        "level": 4,
-    },
-
-    "supervisor": {
-        "name": "🛡️ Supervisor",
-        "level": 3,
-    },
-
-    "support": {
-        "name": "👨‍💻 Suporte",
-        "level": 2,
-    },
-
-    "trainee": {
-        "name": "🎓 Treinando",
-        "level": 1,
-    },
-}
 
 
 def get_staff(user_id):
@@ -269,24 +300,66 @@ def get_staff(user_id):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT user_id, username, full_name, role
+        SELECT *
         FROM staff
         WHERE user_id = ?
     """, (user_id,))
 
-    result = cur.fetchone()
+    row = cur.fetchone()
 
     conn.close()
 
-    return result
+    return row
 
 
-def add_staff(
+def get_staff_role(user_id):
+
+    if is_owner(user_id):
+        return "admin"
+
+    staff = get_staff(user_id)
+
+    if not staff:
+        return None
+
+    return staff["role"]
+
+
+def has_permission(
+    user_id,
+    minimum_role="support"
+):
+
+    role = get_staff_role(user_id)
+
+    if not role:
+        return False
+
+    if role not in ROLES:
+        return False
+
+    if minimum_role not in ROLES:
+        return False
+
+    return (
+        ROLES[role]["level"]
+        >= ROLES[minimum_role]["level"]
+    )
+
+
+# ============================================================
+# EQUIPE
+# ============================================================
+
+def add_staff_db(
     user_id,
     username,
     full_name,
     role="support"
 ):
+
+    if role not in ROLES:
+        role = "support"
 
     conn = get_db()
     cur = conn.cursor()
@@ -313,53 +386,64 @@ def add_staff(
     conn.close()
 
 
-def remove_staff(user_id):
+def remove_staff_db(user_id):
 
     conn = get_db()
     cur = conn.cursor()
 
-    cur.execute(
-        "DELETE FROM staff WHERE user_id = ?",
-        (user_id,)
-    )
+    cur.execute("""
+        DELETE FROM staff
+        WHERE user_id = ?
+    """, (user_id,))
 
     conn.commit()
     conn.close()
 
 
-def staff_role(user_id):
-
-    if is_owner(user_id):
-        return "admin"
-
-    staff = get_staff(user_id)
-
-    if not staff:
-        return None
-
-    return staff[3]
-
-
-def has_staff_permission(
+def update_staff_role(
     user_id,
-    minimum_role="support"
+    role
 ):
-
-    role = staff_role(user_id)
-
-    if not role:
-        return False
 
     if role not in ROLES:
         return False
 
-    if minimum_role not in ROLES:
-        return False
+    conn = get_db()
+    cur = conn.cursor()
 
-    return (
-        ROLES[role]["level"]
-        >= ROLES[minimum_role]["level"]
-    )
+    cur.execute("""
+        UPDATE staff
+        SET role = ?
+        WHERE user_id = ?
+    """, (
+        role,
+        user_id
+    ))
+
+    changed = cur.rowcount > 0
+
+    conn.commit()
+    conn.close()
+
+    return changed
+
+
+def list_staff():
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM staff
+        ORDER BY role DESC, added_at ASC
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    return rows
 
 
 # ============================================================
@@ -383,9 +467,11 @@ def create_ticket(
             username,
             full_name,
             category,
+            status,
+            priority,
             created_at
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'open', 'normal', ?)
     """, (
         user_id,
         username,
@@ -414,11 +500,11 @@ def get_ticket(ticket_id):
         LIMIT 1
     """, (ticket_id,))
 
-    result = cur.fetchone()
+    row = cur.fetchone()
 
     conn.close()
 
-    return result
+    return row
 
 
 def get_open_ticket(user_id):
@@ -435,11 +521,11 @@ def get_open_ticket(user_id):
         LIMIT 1
     """, (user_id,))
 
-    result = cur.fetchone()
+    row = cur.fetchone()
 
     conn.close()
 
-    return result
+    return row
 
 
 def get_ticket_by_topic(topic_id):
@@ -455,11 +541,38 @@ def get_ticket_by_topic(topic_id):
         LIMIT 1
     """, (topic_id,))
 
-    result = cur.fetchone()
+    row = cur.fetchone()
 
     conn.close()
 
-    return result
+    return row
+
+
+def get_all_open_tickets():
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT *
+        FROM tickets
+        WHERE status = 'open'
+        ORDER BY
+            CASE priority
+                WHEN 'urgente' THEN 1
+                WHEN 'alta' THEN 2
+                WHEN 'normal' THEN 3
+                WHEN 'baixa' THEN 4
+                ELSE 5
+            END,
+            id ASC
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    return rows
 
 
 def set_topic(
@@ -509,6 +622,9 @@ def set_priority(
     priority
 ):
 
+    if priority not in PRIORITIES:
+        return False
+
     conn = get_db()
     cur = conn.cursor()
 
@@ -523,6 +639,8 @@ def set_priority(
 
     conn.commit()
     conn.close()
+
+    return True
 
 
 def close_ticket(
@@ -540,14 +658,19 @@ def close_ticket(
             closed_at = ?,
             closed_by = ?
         WHERE id = ?
+        AND status = 'open'
     """, (
         now(),
         closed_by,
         ticket_id
     ))
 
+    changed = cur.rowcount > 0
+
     conn.commit()
     conn.close()
+
+    return changed
 
 
 # ============================================================
@@ -597,8 +720,12 @@ def remove_ticket_staff(
         user_id
     ))
 
+    changed = cur.rowcount > 0
+
     conn.commit()
     conn.close()
+
+    return changed
 
 
 def has_ticket_access(
@@ -606,7 +733,7 @@ def has_ticket_access(
     user_id
 ):
 
-    if has_staff_permission(
+    if has_permission(
         user_id,
         "support"
     ):
@@ -620,6 +747,7 @@ def has_ticket_access(
         FROM ticket_staff
         WHERE ticket_id = ?
         AND user_id = ?
+        LIMIT 1
     """, (
         ticket_id,
         user_id
@@ -630,6 +758,31 @@ def has_ticket_access(
     conn.close()
 
     return result is not None
+
+
+def get_ticket_staff(ticket_id):
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            ts.user_id,
+            s.username,
+            s.full_name,
+            s.role
+        FROM ticket_staff ts
+        LEFT JOIN staff s
+            ON s.user_id = ts.user_id
+        WHERE ts.ticket_id = ?
+        ORDER BY ts.added_at ASC
+    """, (ticket_id,))
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    return rows
 
 
 # ============================================================
@@ -677,165 +830,54 @@ def get_messages(ticket_id):
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT
-            sender_id,
-            sender_type,
-            message_type,
-            content,
-            created_at
+        SELECT *
         FROM messages
         WHERE ticket_id = ?
         ORDER BY id ASC
     """, (ticket_id,))
 
-    results = cur.fetchall()
+    rows = cur.fetchall()
 
     conn.close()
 
-    return results
+    return rows
 
 
 # ============================================================
-# TRANSCRIÇÃO
+# LOGS
 # ============================================================
 
-def generate_transcript(ticket):
-
-    ticket_id = ticket[0]
-    user_id = ticket[1]
-    username = ticket[2]
-    full_name = ticket[3]
-    category = ticket[4]
-    status = ticket[5]
-    priority = ticket[6]
-    assigned_to = ticket[7]
-    created_at = ticket[9]
-    closed_at = ticket[10]
-
-    messages = get_messages(ticket_id)
-
-    lines = []
-
-    lines.append(
-        "========================================"
-    )
-
-    lines.append(
-        f"TICKET #{ticket_id:04d}"
-    )
-
-    lines.append(
-        "========================================"
-    )
-
-    lines.append(
-        f"Usuário: {username or full_name}"
-    )
-
-    lines.append(
-        f"ID: {user_id}"
-    )
-
-    lines.append(
-        f"Categoria: {category}"
-    )
-
-    lines.append(
-        f"Prioridade: {priority}"
-    )
-
-    lines.append(
-        f"Status: {status}"
-    )
-
-    lines.append(
-        f"Criado: {created_at}"
-    )
-
-    lines.append(
-        f"Fechado: {closed_at or '-'}"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "-------------- MENSAGENS --------------"
-    )
-
-    lines.append("")
-
-    for message in messages:
-
-        sender_id = message[0]
-        sender_type = message[1]
-        message_type = message[2]
-        content = message[3]
-        created = message[4]
-
-        lines.append(
-            f"[{created}] "
-            f"{sender_type.upper()} "
-            f"({sender_id}) "
-            f"[{message_type}]"
-        )
-
-        lines.append(
-            content or "[sem texto]"
-        )
-
-        lines.append("")
-
-    lines.append(
-        "========================================"
-    )
-
-    return "\n".join(lines)
-
-
-async def send_transcript(
-    context,
-    ticket
+def save_log(
+    ticket_id,
+    actor_id,
+    action,
+    details=""
 ):
 
-    transcript = generate_transcript(ticket)
+    conn = get_db()
+    cur = conn.cursor()
 
-    if LOG_CHAT_ID == 0:
-        return
-
-    ticket_id = ticket[0]
-
-    file = io.BytesIO(
-        transcript.encode("utf-8")
-    )
-
-    file.name = (
-        f"ticket-{ticket_id:04d}.txt"
-    )
-
-    try:
-
-        await context.bot.send_document(
-            chat_id=LOG_CHAT_ID,
-            document=file,
-            caption=(
-                f"📜 **Transcrição do Ticket "
-                f"#{ticket_id:04d}**\n\n"
-                f"📂 {ticket[4]}\n"
-                f"🚨 {ticket[6]}"
-            ),
-            parse_mode="Markdown"
+    cur.execute("""
+        INSERT INTO logs
+        (
+            ticket_id,
+            actor_id,
+            action,
+            details,
+            created_at
         )
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        ticket_id,
+        actor_id,
+        action,
+        details,
+        now()
+    ))
 
-    except Exception:
+    conn.commit()
+    conn.close()
 
-        logger.exception(
-            "Erro enviando transcrição."
-        )
-
-
-# ============================================================
-# LOG
-# ============================================================
 
 async def send_log(
     context,
@@ -850,7 +892,7 @@ async def send_log(
         await context.bot.send_message(
             chat_id=LOG_CHAT_ID,
             text=text,
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     except Exception:
@@ -861,7 +903,142 @@ async def send_log(
 
 
 # ============================================================
-# PAINEL PRINCIPAL
+# TRANSCRIÇÃO
+# ============================================================
+
+def generate_transcript(ticket):
+
+    messages = get_messages(
+        ticket["id"]
+    )
+
+    lines = []
+
+    lines.append(
+        "=========================================="
+    )
+
+    lines.append(
+        f"TICKET #{ticket['id']:04d}"
+    )
+
+    lines.append(
+        "=========================================="
+    )
+
+    lines.append(
+        f"Usuário: {ticket['username'] or ticket['full_name']}"
+    )
+
+    lines.append(
+        f"ID: {ticket['user_id']}"
+    )
+
+    lines.append(
+        f"Categoria: {ticket['category']}"
+    )
+
+    lines.append(
+        f"Prioridade: {ticket['priority']}"
+    )
+
+    lines.append(
+        f"Status: {ticket['status']}"
+    )
+
+    lines.append(
+        f"Criado: {ticket['created_at']}"
+    )
+
+    lines.append(
+        f"Fechado: {ticket['closed_at'] or '-'}"
+    )
+
+    lines.append(
+        f"Responsável: {ticket['assigned_to'] or '-'}"
+    )
+
+    lines.append("")
+
+    lines.append(
+        "================ MENSAGENS ================"
+    )
+
+    lines.append("")
+
+    for message in messages:
+
+        sender_type = message["sender_type"]
+        sender_id = message["sender_id"]
+        message_type = message["message_type"]
+        content = message["content"] or ""
+
+        lines.append(
+            f"[{message['created_at']}] "
+            f"{sender_type.upper()} "
+            f"ID:{sender_id} "
+            f"TYPE:{message_type}"
+        )
+
+        lines.append(content)
+
+        lines.append("")
+
+    lines.append(
+        "=========================================="
+    )
+
+    return "\n".join(lines)
+
+
+async def send_transcript(
+    context,
+    ticket
+):
+
+    if LOG_CHAT_ID == 0:
+        return
+
+    transcript = generate_transcript(
+        ticket
+    )
+
+    file = io.BytesIO(
+        transcript.encode("utf-8")
+    )
+
+    file.name = (
+        f"ticket-{ticket['id']:04d}.txt"
+    )
+
+    try:
+
+        await context.bot.send_document(
+            chat_id=LOG_CHAT_ID,
+            document=file,
+            caption=(
+                f"📜 <b>Transcrição</b>\n\n"
+                f"🎫 Ticket: "
+                f"<code>#{ticket['id']:04d}</code>\n"
+                f"👤 Usuário: "
+                f"<code>{ticket['user_id']}</code>\n"
+                f"📂 Categoria: "
+                f"{esc(ticket['category'])}\n"
+                f"🚨 Prioridade: "
+                f"{esc(ticket['priority'])}"
+            ),
+            parse_mode="HTML"
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Erro enviando transcrição."
+        )
+
+
+# ============================================================
+# PAINÉIS
 # ============================================================
 
 def main_panel():
@@ -918,15 +1095,25 @@ def category_panel():
     ])
 
 
-def ticket_controls(ticket_id):
+def ticket_user_panel(
+    ticket_id
+):
 
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
-                "🚨 Prioridade",
-                callback_data=f"priority_{ticket_id}"
+                "🔒 Fechar Ticket",
+                callback_data=f"user_close_{ticket_id}"
             )
-        ],
+        ]
+    ])
+
+
+def staff_ticket_panel(
+    ticket_id
+):
+
+    return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(
                 "🎯 Assumir",
@@ -936,151 +1123,26 @@ def ticket_controls(ticket_id):
                 "🔒 Fechar",
                 callback_data=f"close_{ticket_id}"
             )
+        ],
+        [
+            InlineKeyboardButton(
+                "🚨 Prioridade",
+                callback_data=f"priority_{ticket_id}"
+            )
         ]
     ])
 
 
-# ============================================================
-# START
-# ============================================================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+def priority_panel(
+    ticket_id
 ):
 
-    if update.effective_chat.type != ChatType.PRIVATE:
-        return
-
-    user = update.effective_user
-
-    await update.message.reply_text(
-        f"👋 Olá, {user.first_name}!\n\n"
-        "🎫 **CENTRAL DE ATENDIMENTO**\n\n"
-        "Escolha uma opção abaixo.",
-        parse_mode="Markdown",
-        reply_markup=main_panel()
-    )
-
-
-# ============================================================
-# /TICKET
-# ============================================================
-
-async def ticket_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if update.effective_chat.type != ChatType.PRIVATE:
-        return
-
-    await update.message.reply_text(
-        "🎫 **CENTRAL DE TICKETS**\n\n"
-        "Escolha a categoria do atendimento:",
-        parse_mode="Markdown",
-        reply_markup=category_panel()
-    )
-
-
-# ============================================================
-# ABRIR PAINEL
-# ============================================================
-
-async def open_ticket_button(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    await query.edit_message_text(
-        "🎫 **CENTRAL DE TICKETS**\n\n"
-        "Escolha a categoria:",
-        parse_mode="Markdown",
-        reply_markup=category_panel()
-    )
-
-
-# ============================================================
-# CRIAÇÃO DO TICKET
-# ============================================================
-
-async def category_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    await query.answer()
-
-    user = query.from_user
-
-    existing = get_open_ticket(user.id)
-
-    if existing:
-
-        await query.edit_message_text(
-            f"⚠️ Você já possui um ticket aberto.\n\n"
-            f"🎫 **#{existing[0]:04d}**",
-            parse_mode="Markdown",
-            reply_markup=ticket_controls(
-                existing[0]
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🟢 Baixa",
+                callback_data=f"setprio_{ticket_id}_baixa"
             )
-        )
-
-        return
-
-    categories = {
-        "cat_compras": "🛒 Compras",
-        "cat_suporte": "🛠️ Suporte",
-        "cat_financeiro": "💰 Financeiro",
-        "cat_outros": "📦 Outros"
-    }
-
-    category = categories.get(
-        query.data
-    )
-
-    if not category:
-        return
-
-    if SUPPORT_CHAT_ID == 0:
-
-        await query.edit_message_text(
-            "❌ SUPPORT_CHAT_ID não configurado."
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # BANCO
-    # --------------------------------------------------------
-
-    ticket_id = create_ticket(
-        user.id,
-        safe_username(user),
-        user.full_name,
-        category
-    )
-
-    # --------------------------------------------------------
-    # TÓPICO
-    # --------------------------------------------------------
-
-    try:
-
-        topic = await context.bot.create_forum_topic(
-            chat_id=SUPPORT_CHAT_ID,
-            name=(
-                f"🎫 #{ticket_id:04d} "
-                f"- {safe_username(user)}"
-            )
-        )
-
-        topic_id = topic.message_thread_id
-
-     
+        ],
+        [
+            InlineKeyboard
